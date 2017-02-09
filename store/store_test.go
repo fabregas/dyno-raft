@@ -9,7 +9,7 @@ import (
 
 // Test_StoreOpen tests that the store can be opened.
 func Test_StoreOpen(t *testing.T) {
-	s := New()
+	s := New(1)
 	tmpDir, _ := ioutil.TempDir("", "store_test")
 	defer os.RemoveAll(tmpDir)
 
@@ -26,7 +26,7 @@ func Test_StoreOpen(t *testing.T) {
 
 // Test_StoreOpenSingleNode tests that a command can be applied to the log
 func Test_StoreOpenSingleNode(t *testing.T) {
-	s := New()
+	s := New(1)
 	tmpDir, _ := ioutil.TempDir("", "store_test")
 	defer os.RemoveAll(tmpDir)
 

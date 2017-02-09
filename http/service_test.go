@@ -14,7 +14,7 @@ import (
 // Test_NewServer tests that a server can perform all basic operations.
 func Test_NewServer(t *testing.T) {
 	store := newTestStore()
-	s := &testServer{New(":0", store)}
+	s := &testServer{New(":0", ":0", store)}
 	if s == nil {
 		t.Fatal("failed to create HTTP service")
 	}
@@ -82,8 +82,16 @@ func (t *testStore) Delete(key string) error {
 	return nil
 }
 
-func (t *testStore) Join(addr string) error {
-	return nil
+func (t *testStore) Join(addr, haddr, name string) ([]string, error) {
+	return []string{}, nil
+}
+
+func (t *testStore) Leader() string {
+	return ""
+}
+
+func (t *testStore) RaftStats() map[string]string {
+	return map[string]string{"test": "444"}
 }
 
 func doGet(t *testing.T, url, key string) string {
