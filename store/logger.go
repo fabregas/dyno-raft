@@ -6,7 +6,6 @@ import (
 	"os"
 )
 
-// ------ logger
 var DEBUG_PREFIX = []byte("[DEBUG]")
 var INFO_PREFIX = []byte("[INFO]")
 

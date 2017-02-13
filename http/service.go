@@ -3,12 +3,16 @@
 package httpd
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // Store is the interface Raft-backed key-value stores must implement.
@@ -29,6 +33,8 @@ type Store interface {
 	Join(addr, haddr, name string) ([]string, error)
 
 	RaftStats() map[string]string
+
+	SetPeers([]string)
 }
 
 // Service provides HTTP service.
@@ -37,15 +43,17 @@ type Service struct {
 	raftAddr string
 	ln       net.Listener
 
-	store Store
+	store  Store
+	logger *log.Logger
 }
 
 // New returns an uninitialized HTTP service.
-func New(addr, raftAddr string, store Store) *Service {
+func New(addr, raftAddr string, store Store, logger *log.Logger) *Service {
 	return &Service{
 		addr:     addr,
 		raftAddr: raftAddr,
 		store:    store,
+		logger:   logger,
 	}
 }
 
@@ -77,6 +85,59 @@ func (s *Service) Start() error {
 func (s *Service) Close() {
 	s.ln.Close()
 	return
+}
+
+// join node to the raft
+func (s *Service) JoinToRaft(joinAddr string) error {
+	// get leader of Raft ring
+	leader := ""
+	for {
+		resp, err := http.Get(fmt.Sprintf("http://%s/leader", joinAddr))
+		if err != nil {
+			s.logger.Printf("[WARN] failed to get leader at %s: %s", joinAddr, err.Error())
+			time.Sleep(2 * time.Second) //FIXME
+			continue
+		}
+		body, err := ioutil.ReadAll(resp.Body)
+		leader = string(body)
+		resp.Body.Close()
+		if leader == "" {
+			// no leader in cluster, trying join to known node
+			leader = joinAddr
+		}
+		break
+	}
+
+	// send join request to leader
+	b, err := json.Marshal(map[string]string{
+		"addr":     s.raftAddr,
+		"httpAddr": s.addr,
+	})
+	if err != nil {
+		return err
+	}
+	resp, err := http.Post(
+		fmt.Sprintf("http://%s/join", joinAddr),
+		"application-type/json", bytes.NewReader(b),
+	)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		body, _ := ioutil.ReadAll(resp.Body)
+		s.logger.Printf("[WARN] Join request failed: %s", string(body))
+		return nil
+	}
+	// parse foreign peers list and setup it
+	peers := []string{}
+	if err := json.NewDecoder(resp.Body).Decode(&peers); err != nil {
+		return err
+	}
+
+	s.store.SetPeers(peers)
+	return nil
+
 }
 
 // ServeHTTP allows Service to serve HTTP requests.
@@ -154,6 +215,12 @@ func (s *Service) handleKeyRequest(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case "GET":
+		leader := s.store.Leader()
+		if leader != "" && leader != s.addr {
+			http.Redirect(w, r, fmt.Sprintf("http://%s%s", leader, r.URL.Path), 301)
+			return
+		}
+
 		k := getKey()
 		if k == "" {
 			w.WriteHeader(http.StatusBadRequest)
@@ -173,6 +240,17 @@ func (s *Service) handleKeyRequest(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, string(b))
 
 	case "POST":
+		leader := s.store.Leader()
+		if leader == "" {
+			w.WriteHeader(http.StatusInternalServerError)
+			io.WriteString(w, "No leader in Raft")
+			return
+		}
+		if leader != s.addr {
+			http.Redirect(w, r, fmt.Sprintf("http://%s/key", leader), 301)
+			return
+		}
+
 		// Read the value from the POST body.
 		m := map[string]string{}
 		if err := json.NewDecoder(r.Body).Decode(&m); err != nil {
@@ -182,6 +260,7 @@ func (s *Service) handleKeyRequest(w http.ResponseWriter, r *http.Request) {
 		for k, v := range m {
 			if err := s.store.Set(k, v); err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
+				io.WriteString(w, err.Error())
 				return
 			}
 		}

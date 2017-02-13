@@ -25,12 +25,16 @@ var httpAddr string
 var raftAddr string
 var joinAddr string
 var raftDir string
+var nodeName string
+var minNodes int
 
 func init() {
 	flag.StringVar(&httpAddr, "haddr", DefaultHTTPAddr, "Set the HTTP bind address")
 	flag.StringVar(&raftAddr, "raddr", DefaultRaftAddr, "Set Raft bind address")
 	flag.StringVar(&raftDir, "dir", "", "Set the Raft data path")
 	flag.StringVar(&joinAddr, "join", "", "Set join address, if any")
+	flag.IntVar(&minNodes, "quorum", 1, "Set the minimum nodes in raft cluster for quorum")
+	flag.StringVar(&nodeName, "name", "", "Set the node name (label)")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s [options] \n", os.Args[0])
 		flag.PrintDefaults()
@@ -81,11 +85,7 @@ func main() {
 	}
 	os.MkdirAll(raftDir, 0700)
 
-	minimumNodesCnt := 1
-	s := store.New(minimumNodesCnt)
-	s.RaftDir = raftDir
-	var err error
-	raftAddr, err = formBindAddr(raftAddr)
+	raftAddr, err := formBindAddr(raftAddr)
 	if err != nil {
 		log.Fatalf("failed to parse raft addr: %s", err.Error())
 	}
@@ -93,27 +93,27 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to parse http addr: %s", err.Error())
 	}
-	s.RaftBind = raftAddr
-	s.HttpBind = httpAddr
+	s := store.New(raftDir, raftAddr, httpAddr, nodeName, minNodes)
 	if err := s.Open(joinAddr == ""); err != nil {
 		log.Fatalf("failed to open store: %s", err.Error())
 	}
 
-	h := httpd.New(httpAddr, raftAddr, s)
+	logger := log.New(store.NewLogWriter(1), fmt.Sprintf("[%s] ", nodeName), log.LstdFlags)
+	h := httpd.New(httpAddr, raftAddr, s, logger)
 	if err := h.Start(); err != nil {
 		log.Fatalf("failed to start HTTP service: %s", err.Error())
 	}
 
 	if joinAddr != "" {
-		if err := s.JoinToRaft(joinAddr); err != nil {
+		if err := h.JoinToRaft(joinAddr); err != nil {
 			log.Fatalf("failed to join to Raft: %s", err.Error())
 		}
 	}
 
-	log.Println("hraft started successfully")
+	log.Println("dyno-raft started successfully")
 
 	terminate := make(chan os.Signal, 1)
 	signal.Notify(terminate, os.Interrupt)
 	<-terminate
-	log.Println("hraftd exiting")
+	log.Println("dyno-raft exiting")
 }

@@ -7,15 +7,12 @@
 package store
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net"
-	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
@@ -46,6 +43,7 @@ type Store struct {
 	RaftDir         string
 	RaftBind        string
 	HttpBind        string
+	NodeName        string
 	MinimumNodesCnt int
 
 	mu sync.Mutex
@@ -59,11 +57,15 @@ type Store struct {
 }
 
 // New returns a new Store.
-func New(minimumNodesCnt int) *Store {
+func New(raftDir, raftAddr, httpAddr, nodeName string, minimumNodesCnt int) *Store {
 	return &Store{
+		RaftDir:         raftDir,
+		RaftBind:        raftAddr,
+		HttpBind:        httpAddr,
+		NodeName:        nodeName,
 		MinimumNodesCnt: minimumNodesCnt,
 		m:               make(map[string]string),
-		logger:          log.New(NewLogWriter(1), "[store] ", log.LstdFlags),
+		logger:          log.New(NewLogWriter(1), fmt.Sprintf("[%s] ", nodeName), log.LstdFlags),
 	}
 }
 
@@ -77,7 +79,7 @@ func (s *Store) Open(enableSingleNode bool) error {
 
 	// setup nodes cache
 	s.nodesCache = map[string]NodeInfo{}
-	s.nodesCache[s.RaftBind] = NodeInfo{s.HttpBind, ""}
+	s.nodesCache[s.RaftBind] = NodeInfo{s.HttpBind, s.NodeName}
 
 	// Setup Raft communication.
 	addr, err := net.ResolveTCPAddr("tcp", s.RaftBind)
@@ -122,53 +124,8 @@ func (s *Store) Open(enableSingleNode bool) error {
 	return nil
 }
 
-func (s *Store) JoinToRaft(joinAddr string) error {
-	// get leader of Raft ring
-	leader := ""
-	for {
-		resp, err := http.Get(fmt.Sprintf("http://%s/leader", joinAddr))
-		if err != nil {
-			s.logger.Printf("[WARN] failed to get leader at %s: %s", joinAddr, err.Error())
-			time.Sleep(2 * time.Second)
-			continue
-		}
-		body, err := ioutil.ReadAll(resp.Body)
-		leader = string(body)
-		resp.Body.Close()
-		if leader == "" {
-			// no leader in cluster, trying join to known node
-			leader = joinAddr
-		}
-		break
-	}
-
-	// send join request to leader
-	b, err := json.Marshal(map[string]string{
-		"addr":     s.RaftBind,
-		"httpAddr": s.HttpBind,
-	})
-	if err != nil {
-		return err
-	}
-	resp, err := http.Post(fmt.Sprintf("http://%s/join", joinAddr), "application-type/json", bytes.NewReader(b))
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		body, _ := ioutil.ReadAll(resp.Body)
-		s.logger.Printf("[WARN] Join request failed: %s", string(body))
-		return nil
-	}
-	// parse foreign peers list and setup it
-	peers := []string{}
-	if err := json.NewDecoder(resp.Body).Decode(&peers); err != nil {
-		return err
-	}
-
+func (s *Store) SetPeers(peers []string) {
 	s.raft.SetPeers(peers)
-	return nil
-
 }
 
 func (s *Store) checkPeers() {
@@ -211,9 +168,7 @@ func (s *Store) checkPeers() {
 				conn.Close()
 			}
 		}
-
 	}
-
 }
 
 func (s *Store) syncLeader() {
@@ -354,9 +309,7 @@ func (s *Store) Leader() string {
 			return nodeInfo.HttpAddr
 		}
 	}
-
 	return ""
-
 }
 
 type fsm Store

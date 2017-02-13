@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 )
@@ -14,7 +16,8 @@ import (
 // Test_NewServer tests that a server can perform all basic operations.
 func Test_NewServer(t *testing.T) {
 	store := newTestStore()
-	s := &testServer{New(":0", ":0", store)}
+	logger := log.New(os.Stderr, "", log.LstdFlags)
+	s := &testServer{New(":0", ":0", store, logger)}
 	if s == nil {
 		t.Fatal("failed to create HTTP service")
 	}
@@ -92,6 +95,10 @@ func (t *testStore) Leader() string {
 
 func (t *testStore) RaftStats() map[string]string {
 	return map[string]string{"test": "444"}
+}
+
+func (t *testStore) SetPeers(p []string) {
+
 }
 
 func doGet(t *testing.T, url, key string) string {
