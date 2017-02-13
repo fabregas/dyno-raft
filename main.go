@@ -10,8 +10,8 @@ import (
 	"os/signal"
 	"strings"
 
+	"dyno-raft/dynoraft"
 	"dyno-raft/http"
-	"dyno-raft/store"
 )
 
 // Command line defaults
@@ -93,12 +93,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to parse http addr: %s", err.Error())
 	}
-	s := store.New(raftDir, raftAddr, httpAddr, nodeName, minNodes)
+
+	logger := log.New(dynoraft.NewLogWriter(1), fmt.Sprintf("[%s] ", nodeName), log.LstdFlags)
+	s := dynoraft.NewRaftManager(raftDir, raftAddr, httpAddr, nodeName, minNodes, logger)
 	if err := s.Open(joinAddr == ""); err != nil {
 		log.Fatalf("failed to open store: %s", err.Error())
 	}
 
-	logger := log.New(store.NewLogWriter(1), fmt.Sprintf("[%s] ", nodeName), log.LstdFlags)
 	h := httpd.New(httpAddr, raftAddr, s, logger)
 	if err := h.Start(); err != nil {
 		log.Fatalf("failed to start HTTP service: %s", err.Error())

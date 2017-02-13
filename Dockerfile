@@ -5,7 +5,7 @@ WORKDIR $GOPATH
 RUN go get github.com/hashicorp/raft && go get github.com/hashicorp/raft-boltdb
 
 ADD http $GOPATH/src/dyno-raft/http
-ADD store $GOPATH/src/dyno-raft/store
+ADD dynoraft $GOPATH/src/dyno-raft/dynoraft
 ADD main.go $GOPATH/src/dyno-raft/
 
 RUN go install dyno-raft

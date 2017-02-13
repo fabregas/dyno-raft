@@ -1,16 +1,9 @@
-// Package store provides a simple distributed key-value store. The keys and
-// associated values are changed via distributed consensus, meaning that the
-// values are changed only when a majority of nodes in the cluster agree on
-// the new value.
-//
-// Distributed consensus is provided via the Raft algorithm.
-package store
+package dynoraft
 
 import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"os"
@@ -38,16 +31,15 @@ type NodeInfo struct {
 	Name     string
 }
 
-// Store is a simple key-value store, where all changes are made via Raft consensus.
-type Store struct {
-	RaftDir         string
-	RaftBind        string
-	HttpBind        string
-	NodeName        string
-	MinimumNodesCnt int
+type RaftManager struct {
+	raftDir         string
+	raftBind        string
+	httpBind        string
+	nodeName        string
+	minimumNodesCnt int
 
-	mu sync.Mutex
-	m  map[string]string // The key-value store for the system.
+	mu  sync.Mutex
+	fsm *Fsm
 
 	raft       *raft.Raft // The consensus mechanism
 	peerStore  raft.PeerStore
@@ -56,20 +48,19 @@ type Store struct {
 	logger *log.Logger
 }
 
-// New returns a new Store.
-func New(raftDir, raftAddr, httpAddr, nodeName string, minimumNodesCnt int) *Store {
-	return &Store{
-		RaftDir:         raftDir,
-		RaftBind:        raftAddr,
-		HttpBind:        httpAddr,
-		NodeName:        nodeName,
-		MinimumNodesCnt: minimumNodesCnt,
-		m:               make(map[string]string),
-		logger:          log.New(NewLogWriter(1), fmt.Sprintf("[%s] ", nodeName), log.LstdFlags),
+// New returns a new RaftManager.
+func NewRaftManager(raftDir, raftAddr, httpAddr, nodeName string, minimumNodesCnt int, logger *log.Logger) *RaftManager {
+	return &RaftManager{
+		raftDir:         raftDir,
+		raftBind:        raftAddr,
+		httpBind:        httpAddr,
+		nodeName:        nodeName,
+		minimumNodesCnt: minimumNodesCnt,
+		logger:          logger,
 	}
 }
 
-func (s *Store) Open(enableSingleNode bool) error {
+func (s *RaftManager) Open(enableSingleNode bool) error {
 	// Setup Raft configuration.
 	config := raft.DefaultConfig()
 	config.SnapshotInterval = 60 * time.Second
@@ -79,14 +70,14 @@ func (s *Store) Open(enableSingleNode bool) error {
 
 	// setup nodes cache
 	s.nodesCache = map[string]NodeInfo{}
-	s.nodesCache[s.RaftBind] = NodeInfo{s.HttpBind, s.NodeName}
+	s.nodesCache[s.raftBind] = NodeInfo{s.httpBind, s.nodeName}
 
 	// Setup Raft communication.
-	addr, err := net.ResolveTCPAddr("tcp", s.RaftBind)
+	addr, err := net.ResolveTCPAddr("tcp", s.raftBind)
 	if err != nil {
 		return err
 	}
-	transport, err := raft.NewTCPTransportWithLogger(s.RaftBind, addr, 3, 10*time.Second, s.logger)
+	transport, err := raft.NewTCPTransportWithLogger(s.raftBind, addr, 3, 10*time.Second, s.logger)
 	if err != nil {
 		return err
 	}
@@ -94,26 +85,27 @@ func (s *Store) Open(enableSingleNode bool) error {
 	// Create peer storage.
 	s.peerStore = &raft.StaticPeers{}
 
-	if enableSingleNode && s.MinimumNodesCnt == 1 {
+	if enableSingleNode && s.minimumNodesCnt == 1 {
 		s.logger.Println("enabling single-node mode")
 		config.EnableSingleNode = true
 		config.DisableBootstrapAfterElect = false
 	}
 
 	// Create the snapshot store. This allows the Raft to truncate the log.
-	snapshots, err := raft.NewFileSnapshotStore(s.RaftDir, retainSnapshotCount, os.Stderr)
+	snapshots, err := raft.NewFileSnapshotStore(s.raftDir, retainSnapshotCount, os.Stderr)
 	if err != nil {
 		return fmt.Errorf("file snapshot store: %s", err)
 	}
 
 	// Create the log store and stable store.
-	logStore, err := raftboltdb.NewBoltStore(filepath.Join(s.RaftDir, "raft.db"))
+	logStore, err := raftboltdb.NewBoltStore(filepath.Join(s.raftDir, "raft.db"))
 	if err != nil {
 		return fmt.Errorf("new bolt store: %s", err)
 	}
 
 	// Instantiate the Raft systems.
-	ra, err := raft.NewRaft(config, (*fsm)(s), logStore, logStore, snapshots, s.peerStore, transport)
+	s.fsm = NewFsm()
+	ra, err := raft.NewRaft(config, s.fsm, logStore, logStore, snapshots, s.peerStore, transport)
 	if err != nil {
 		return fmt.Errorf("new raft: %s", err)
 	}
@@ -124,18 +116,18 @@ func (s *Store) Open(enableSingleNode bool) error {
 	return nil
 }
 
-func (s *Store) SetPeers(peers []string) {
+func (s *RaftManager) SetPeers(peers []string) {
 	s.raft.SetPeers(peers)
 }
 
-func (s *Store) checkPeers() {
+func (s *RaftManager) checkPeers() {
 	failCnt := map[string]int{}
 	for {
 		time.Sleep(2 * time.Second)
 		peers, _ := s.peerStore.Peers()
 		//fmt.Println(">>>>>> PEERS: ", peers)
 		for _, peer := range peers {
-			if peer == s.RaftBind {
+			if peer == s.raftBind {
 				continue
 			}
 			conn, err := net.Dial("tcp", peer)
@@ -144,7 +136,7 @@ func (s *Store) checkPeers() {
 				failCnt[peer] += 1
 				if failCnt[peer] == 3 {
 					delete(failCnt, peer)
-					if len(peers) <= s.MinimumNodesCnt {
+					if len(peers) <= s.minimumNodesCnt {
 						s.logger.Printf("[WARN] Peer %s does not respond! But we can't remove it...!\n", peer)
 						continue
 					}
@@ -171,7 +163,7 @@ func (s *Store) checkPeers() {
 	}
 }
 
-func (s *Store) syncLeader() {
+func (s *RaftManager) syncLeader() {
 	for leader := range s.raft.LeaderCh() {
 		if !leader {
 			continue
@@ -189,7 +181,7 @@ func (s *Store) syncLeader() {
 	}
 }
 
-func (s *Store) getNodesInfo() map[string]NodeInfo {
+func (s *RaftManager) getNodesInfo() map[string]NodeInfo {
 	v, err := s.Get("__internal_nodes__")
 	if err != nil {
 		s.logger.Printf("[DEBUG] get nodes info error: %s", err)
@@ -208,14 +200,12 @@ func (s *Store) getNodesInfo() map[string]NodeInfo {
 }
 
 // Get returns the value for the given key.
-func (s *Store) Get(key string) (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.m[key], nil
+func (s *RaftManager) Get(key string) (string, error) {
+	return s.fsm.Get(key)
 }
 
 // Set sets the value for the given key.
-func (s *Store) Set(key, value string) error {
+func (s *RaftManager) Set(key, value string) error {
 	if s.raft.State() != raft.Leader {
 		return fmt.Errorf("not leader")
 	}
@@ -235,7 +225,7 @@ func (s *Store) Set(key, value string) error {
 }
 
 // Delete deletes the given key.
-func (s *Store) Delete(key string) error {
+func (s *RaftManager) Delete(key string) error {
 	if s.raft.State() != raft.Leader {
 		return fmt.Errorf("not leader")
 	}
@@ -253,7 +243,7 @@ func (s *Store) Delete(key string) error {
 	return f.Error()
 }
 
-func (s *Store) saveNodes() {
+func (s *RaftManager) saveNodes() {
 	s.mu.Lock()
 	v, err := json.Marshal(s.nodesCache)
 	s.mu.Unlock()
@@ -269,7 +259,7 @@ func (s *Store) saveNodes() {
 
 // Join joins a node, located at addr, to this store. The node must be ready to
 // respond to Raft communications at that address.
-func (s *Store) Join(addr, haddr, name string) ([]string, error) {
+func (s *RaftManager) Join(addr, haddr, name string) ([]string, error) {
 	s.logger.Printf("[INFO] received join request for remote node as %s", addr)
 
 	curPeers, _ := s.peerStore.Peers()
@@ -294,14 +284,14 @@ func (s *Store) Join(addr, haddr, name string) ([]string, error) {
 
 	s.logger.Printf("[INFO] node at %s joined successfully", addr)
 	// return all known peers
-	return raft.AddUniquePeer(newPeers, s.RaftBind), nil
+	return raft.AddUniquePeer(newPeers, s.raftBind), nil
 }
 
-func (s *Store) RaftStats() map[string]string {
+func (s *RaftManager) RaftStats() map[string]string {
 	return s.raft.Stats()
 }
 
-func (s *Store) Leader() string {
+func (s *RaftManager) Leader() string {
 	raftLeader := s.raft.Leader()
 
 	for raftAddr, nodeInfo := range s.getNodesInfo() {
@@ -311,97 +301,3 @@ func (s *Store) Leader() string {
 	}
 	return ""
 }
-
-type fsm Store
-
-// Apply applies a Raft log entry to the key-value store.
-func (f *fsm) Apply(l *raft.Log) interface{} {
-	var c command
-	if err := json.Unmarshal(l.Data, &c); err != nil {
-		panic(fmt.Sprintf("failed to unmarshal command: %s", err.Error()))
-	}
-
-	switch c.Op {
-	case "set":
-		return f.applySet(c.Key, c.Value)
-	case "delete":
-		return f.applyDelete(c.Key)
-	default:
-		panic(fmt.Sprintf("unrecognized command op: %s", c.Op))
-	}
-}
-
-// Snapshot returns a snapshot of the key-value store.
-func (f *fsm) Snapshot() (raft.FSMSnapshot, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	// Clone the map.
-	o := make(map[string]string)
-	for k, v := range f.m {
-		o[k] = v
-	}
-	return &fsmSnapshot{store: o}, nil
-}
-
-// Restore stores the key-value store to a previous state.
-func (f *fsm) Restore(rc io.ReadCloser) error {
-	o := make(map[string]string)
-	if err := json.NewDecoder(rc).Decode(&o); err != nil {
-		return err
-	}
-
-	// Set the state from the snapshot, no lock required according to
-	// Hashicorp docs.
-	f.m = o
-	return nil
-}
-
-func (f *fsm) applySet(key, value string) interface{} {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.m[key] = value
-	return nil
-}
-
-func (f *fsm) applyDelete(key string) interface{} {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	delete(f.m, key)
-	return nil
-}
-
-type fsmSnapshot struct {
-	store map[string]string
-}
-
-func (f *fsmSnapshot) Persist(sink raft.SnapshotSink) error {
-	err := func() error {
-		// Encode data.
-		b, err := json.Marshal(f.store)
-		if err != nil {
-			return err
-		}
-
-		// Write data to sink.
-		if _, err := sink.Write(b); err != nil {
-			return err
-		}
-
-		// Close the sink.
-		if err := sink.Close(); err != nil {
-			return err
-		}
-
-		return nil
-	}()
-
-	if err != nil {
-		sink.Cancel()
-		return err
-	}
-
-	return nil
-}
-
-func (f *fsmSnapshot) Release() {}
