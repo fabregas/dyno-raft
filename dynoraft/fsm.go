@@ -6,16 +6,59 @@ import (
 	"io"
 	"sync"
 
+	"github.com/boltdb/bolt"
 	"github.com/hashicorp/raft"
+)
+
+var (
+	// Bucket names we perform transactions in
+	dbKV = []byte("kv")
 )
 
 type Fsm struct {
 	mu sync.Mutex
 	m  map[string]string // The key-value store for the system.
+
+	conn *bolt.DB
 }
 
-func NewFsm() *Fsm {
-	return &Fsm{m: make(map[string]string)}
+func NewFsm(dbpath string) (*Fsm, error) {
+	handle, err := bolt.Open(dbpath, 0600, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	fsm := &Fsm{m: make(map[string]string), conn: handle}
+	if err := fsm.initialize(); err != nil {
+		return nil, err
+	}
+	return fsm, nil
+}
+
+func (f *Fsm) initialize() error {
+	tx, err := f.conn.Begin(true)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	fmt.Println(">>>>>>>>>. CREATING BUCKET ...")
+	// Create the bucket
+	if _, err := tx.CreateBucketIfNotExists(dbKV); err != nil {
+		return err
+	}
+
+	fmt.Println(">>>>>>>>> ITERATING BUCKET ...")
+	c := tx.Bucket(dbKV).Cursor()
+	for k, v := c.First(); k != nil; k, v = c.Next() {
+		fmt.Println(">>>>>>>>> ITER ...", k, v)
+		f.m[string(k)] = string(v)
+	}
+	return tx.Commit()
+}
+
+func (f *Fsm) Close() error {
+	return f.conn.Close()
 }
 
 // Apply applies a Raft log entry to the key-value store.
@@ -27,18 +70,56 @@ func (f *Fsm) Apply(l *raft.Log) interface{} {
 
 	switch c.Op {
 	case "set":
-		f.mu.Lock()
-		f.m[c.Key] = c.Value
-		f.mu.Unlock()
-		return nil
+		return f.setKV(c.Key, c.Value)
 	case "delete":
-		f.mu.Lock()
-		delete(f.m, c.Key)
-		f.mu.Unlock()
-		return nil
+		return f.deleteKV(c.Key)
 	default:
 		panic(fmt.Sprintf("unrecognized command op: %s", c.Op))
 	}
+}
+
+func (f *Fsm) setKV(key, value string) error {
+	tx, err := f.conn.Begin(true)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	bucket := tx.Bucket(dbKV)
+	if err := bucket.Put([]byte(key), []byte(value)); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	f.mu.Lock()
+	f.m[key] = value
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *Fsm) deleteKV(key string) error {
+	tx, err := f.conn.Begin(true)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	bucket := tx.Bucket(dbKV)
+	if err := bucket.Delete([]byte(key)); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	f.mu.Lock()
+	delete(f.m, key)
+	f.mu.Unlock()
+	return nil
 }
 
 func (f *Fsm) Get(key string) (string, error) {

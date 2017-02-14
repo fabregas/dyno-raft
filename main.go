@@ -9,9 +9,9 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"syscall"
 
-	"dyno-raft/dynoraft"
-	"dyno-raft/http"
+	"dyno-raft/dynonode"
 )
 
 // Command line defaults
@@ -94,19 +94,15 @@ func main() {
 		log.Fatalf("failed to parse http addr: %s", err.Error())
 	}
 
-	logger := log.New(dynoraft.NewLogWriter(1), fmt.Sprintf("[%s] ", nodeName), log.LstdFlags)
-	s := dynoraft.NewRaftManager(raftDir, raftAddr, httpAddr, nodeName, minNodes, logger)
-	if err := s.Open(joinAddr == ""); err != nil {
-		log.Fatalf("failed to open store: %s", err.Error())
-	}
+	logger := log.New(dynonode.NewLogWriter(0), fmt.Sprintf("[%s] ", nodeName), log.LstdFlags)
 
-	h := httpd.New(httpAddr, raftAddr, s, logger)
-	if err := h.Start(); err != nil {
+	node := dynonode.NewDynoNode(httpAddr, raftAddr, raftDir, nodeName, minNodes, logger)
+	if err := node.Start(joinAddr == ""); err != nil {
 		log.Fatalf("failed to start HTTP service: %s", err.Error())
 	}
 
 	if joinAddr != "" {
-		if err := h.JoinToRaft(joinAddr); err != nil {
+		if err := node.JoinToRaft(joinAddr); err != nil {
 			log.Fatalf("failed to join to Raft: %s", err.Error())
 		}
 	}
@@ -114,7 +110,8 @@ func main() {
 	log.Println("dyno-raft started successfully")
 
 	terminate := make(chan os.Signal, 1)
-	signal.Notify(terminate, os.Interrupt)
+	//signal.Notify(terminate, os.Interrupt)
+	signal.Notify(terminate, syscall.SIGINT, syscall.SIGTERM)
 	<-terminate
 	log.Println("dyno-raft exiting")
 }

@@ -1,6 +1,4 @@
-// Package httpd provides the HTTP server for accessing the distributed key-value store.
-// It also provides the endpoint for other nodes to join an existing cluster.
-package httpd
+package dynonode
 
 import (
 	"bytes"
@@ -13,52 +11,37 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"dyno-raft/dynoraft"
 )
 
-// Store is the interface Raft-backed key-value stores must implement.
-type Store interface {
-	// Get returns the value for the given key.
-	Get(key string) (string, error)
-
-	// Set sets the value for the given key, via distributed consensus.
-	Set(key, value string) error
-
-	// Delete removes the given key, via distributed consensus.
-	Delete(key string) error
-
-	// Leader returns current leader in raft
-	Leader() string
-
-	// Join joins the node, reachable at addr, to the cluster.
-	Join(addr, haddr, name string) ([]string, error)
-
-	RaftStats() map[string]string
-
-	SetPeers([]string)
-}
-
-// Service provides HTTP service.
-type Service struct {
+// DynoNode provides node based on raft with dynamic join/remove
+type DynoNode struct {
 	addr     string
 	raftAddr string
 	ln       net.Listener
 
-	store  Store
-	logger *log.Logger
+	raftMgr *dynoraft.RaftManager
+	logger  *log.Logger
 }
 
-// New returns an uninitialized HTTP service.
-func New(addr, raftAddr string, store Store, logger *log.Logger) *Service {
-	return &Service{
+// New returns an uninitialized DynoNode.
+func NewDynoNode(addr, raftAddr, raftDir, nodeName string, minNodes int, logger *log.Logger) *DynoNode {
+	raftMgr := dynoraft.NewRaftManager(raftDir, raftAddr, addr, nodeName, minNodes, logger)
+
+	return &DynoNode{
 		addr:     addr,
 		raftAddr: raftAddr,
-		store:    store,
+		raftMgr:  raftMgr,
 		logger:   logger,
 	}
 }
 
-// Start starts the service.
-func (s *Service) Start() error {
+// Start starts the node.
+func (s *DynoNode) Start(enableSingleNode bool) error {
+	if err := s.raftMgr.Open(enableSingleNode); err != nil {
+		return err
+	}
 	server := http.Server{
 		Handler: s,
 	}
@@ -81,14 +64,14 @@ func (s *Service) Start() error {
 	return nil
 }
 
-// Close closes the service.
-func (s *Service) Close() {
+// Close closes the node.
+func (s *DynoNode) Close() {
 	s.ln.Close()
 	return
 }
 
 // join node to the raft
-func (s *Service) JoinToRaft(joinAddr string) error {
+func (s *DynoNode) JoinToRaft(joinAddr string) error {
 	// get leader of Raft ring
 	leader := ""
 	for {
@@ -135,13 +118,13 @@ func (s *Service) JoinToRaft(joinAddr string) error {
 		return err
 	}
 
-	s.store.SetPeers(peers)
+	s.raftMgr.SetPeers(peers)
 	return nil
 
 }
 
-// ServeHTTP allows Service to serve HTTP requests.
-func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+// ServeHTTP allows DynoNode to serve HTTP requests.
+func (s *DynoNode) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.Path, "/key") {
 		s.handleKeyRequest(w, r)
 	} else if r.URL.Path == "/join" {
@@ -155,8 +138,8 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Service) handleRaftStats(w http.ResponseWriter, r *http.Request) {
-	b, err := json.Marshal(s.store.RaftStats())
+func (s *DynoNode) handleRaftStats(w http.ResponseWriter, r *http.Request) {
+	b, err := json.Marshal(s.raftMgr.RaftStats())
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
@@ -164,12 +147,12 @@ func (s *Service) handleRaftStats(w http.ResponseWriter, r *http.Request) {
 	w.Write(b)
 }
 
-func (s *Service) handleLeader(w http.ResponseWriter, r *http.Request) {
-	addr := s.store.Leader()
+func (s *DynoNode) handleLeader(w http.ResponseWriter, r *http.Request) {
+	addr := s.raftMgr.Leader()
 	io.WriteString(w, addr)
 }
 
-func (s *Service) handleJoin(w http.ResponseWriter, r *http.Request) {
+func (s *DynoNode) handleJoin(w http.ResponseWriter, r *http.Request) {
 	m := map[string]string{}
 	if err := json.NewDecoder(r.Body).Decode(&m); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -187,14 +170,12 @@ func (s *Service) handleJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	peers, err := s.store.Join(remoteAddr, m["httpAddr"], "")
+	peers, err := s.raftMgr.Join(remoteAddr, m["httpAddr"], "")
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		io.WriteString(w, err.Error())
 		return
 	}
-
-	//s.addNode(m["addr"], NodeInfo{m["httpAddr"], ""})
 
 	b, err := json.Marshal(peers)
 	if err != nil {
@@ -204,7 +185,7 @@ func (s *Service) handleJoin(w http.ResponseWriter, r *http.Request) {
 	w.Write(b)
 }
 
-func (s *Service) handleKeyRequest(w http.ResponseWriter, r *http.Request) {
+func (s *DynoNode) handleKeyRequest(w http.ResponseWriter, r *http.Request) {
 	getKey := func() string {
 		parts := strings.Split(r.URL.Path, "/")
 		if len(parts) != 3 {
@@ -215,7 +196,7 @@ func (s *Service) handleKeyRequest(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case "GET":
-		leader := s.store.Leader()
+		leader := s.raftMgr.Leader()
 		if leader != "" && leader != s.addr {
 			http.Redirect(w, r, fmt.Sprintf("http://%s%s", leader, r.URL.Path), 301)
 			return
@@ -225,7 +206,7 @@ func (s *Service) handleKeyRequest(w http.ResponseWriter, r *http.Request) {
 		if k == "" {
 			w.WriteHeader(http.StatusBadRequest)
 		}
-		v, err := s.store.Get(k)
+		v, err := s.raftMgr.Get(k)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
@@ -240,7 +221,7 @@ func (s *Service) handleKeyRequest(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, string(b))
 
 	case "POST":
-		leader := s.store.Leader()
+		leader := s.raftMgr.Leader()
 		if leader == "" {
 			w.WriteHeader(http.StatusInternalServerError)
 			io.WriteString(w, "No leader in Raft")
@@ -258,7 +239,7 @@ func (s *Service) handleKeyRequest(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for k, v := range m {
-			if err := s.store.Set(k, v); err != nil {
+			if err := s.raftMgr.Set(k, v); err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
 				io.WriteString(w, err.Error())
 				return
@@ -271,11 +252,11 @@ func (s *Service) handleKeyRequest(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		if err := s.store.Delete(k); err != nil {
+		if err := s.raftMgr.Delete(k); err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		s.store.Delete(k)
+		s.raftMgr.Delete(k)
 
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -284,6 +265,6 @@ func (s *Service) handleKeyRequest(w http.ResponseWriter, r *http.Request) {
 }
 
 // Addr returns the address on which the Service is listening
-func (s *Service) Addr() net.Addr {
+func (s *DynoNode) Addr() net.Addr {
 	return s.ln.Addr()
 }

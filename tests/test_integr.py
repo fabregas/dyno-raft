@@ -42,3 +42,16 @@ class TestIntegration:
             node = random.choice(nodes)
             val = node.get_val(k)
             assert v == val, "key={}, val={}; received={}".format(k, v, val)
+
+    def test_pers(self):
+        n0 = DynoRaftNode("sindlenode")
+        n0.start()
+        n0.wait_consensus()
+        try:
+            kv = self.set_kv([n0])
+            n0.pause()
+            n0.unpause()
+            n0.wait_consensus()
+            self.get_kv([n0], kv)
+        finally:
+            n0.stop()

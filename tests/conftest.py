@@ -131,6 +131,15 @@ class DynoRaftNode:
         assert resp.status == 200, data
         return json.loads(data)[key]
 
+    def pause(self):
+        docker = libdocker.Client(version='auto')
+        docker.kill(container=self._container['Id'], signal='SIGTERM')
+        docker.wait(container=self._container['Id'], timeout=10)
+
+    def unpause(self):
+        docker = libdocker.Client(version='auto')
+        self.ip = start_container(docker, self._container['Id'])
+
     def stop(self):
         docker = libdocker.Client(version='auto')
         docker.kill(container=self._container['Id'], signal='SIGTERM')
