@@ -89,8 +89,16 @@ class DynoRaftNode:
         self.ip = start_container(docker, self._container['Id'])
 
     def wait_consensus(self, peers=0):
-        for i in range(20):
+        for i in range(30):
+            time.sleep(0.2)
             try:
+                con = http.client.HTTPConnection('{}:11000'.format(self.ip))
+                con.request("GET", "/leader")
+                resp = con.getresponse()
+                data = resp.read()
+                if data == b"":
+                    continue
+
                 con = http.client.HTTPConnection('{}:11000'.format(self.ip))
                 con.request("GET", "/raft-stats")
                 resp = con.getresponse()
@@ -101,8 +109,6 @@ class DynoRaftNode:
                         return
             except ConnectionError:
                 pass
-
-            time.sleep(0.5)
 
     def set_val(self, key, val):
         return self.__set_val(self.ip, key, val)

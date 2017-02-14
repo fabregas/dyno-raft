@@ -16,8 +16,9 @@ var (
 )
 
 type Fsm struct {
-	mu sync.Mutex
-	m  map[string]string // The key-value store for the system.
+	mu    sync.Mutex
+	m     map[string]string // The key-value store for the system.
+	nodes string            // raw nodes info
 
 	conn *bolt.DB
 }
@@ -28,7 +29,10 @@ func NewFsm(dbpath string) (*Fsm, error) {
 		return nil, err
 	}
 
-	fsm := &Fsm{m: make(map[string]string), conn: handle}
+	fsm := &Fsm{
+		m:     make(map[string]string),
+		nodes: "",
+		conn:  handle}
 	if err := fsm.initialize(); err != nil {
 		return nil, err
 	}
@@ -42,16 +46,13 @@ func (f *Fsm) initialize() error {
 	}
 	defer tx.Rollback()
 
-	fmt.Println(">>>>>>>>>. CREATING BUCKET ...")
 	// Create the bucket
 	if _, err := tx.CreateBucketIfNotExists(dbKV); err != nil {
 		return err
 	}
 
-	fmt.Println(">>>>>>>>> ITERATING BUCKET ...")
 	c := tx.Bucket(dbKV).Cursor()
 	for k, v := c.First(); k != nil; k, v = c.Next() {
-		fmt.Println(">>>>>>>>> ITER ...", k, v)
 		f.m[string(k)] = string(v)
 	}
 	return tx.Commit()
@@ -73,9 +74,20 @@ func (f *Fsm) Apply(l *raft.Log) interface{} {
 		return f.setKV(c.Key, c.Value)
 	case "delete":
 		return f.deleteKV(c.Key)
+	case "save_nodes":
+		f.mu.Lock()
+		f.nodes = c.Value
+		f.mu.Unlock()
+		return nil
 	default:
 		panic(fmt.Sprintf("unrecognized command op: %s", c.Op))
 	}
+}
+
+func (f *Fsm) GetNodes() []byte {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return []byte(f.nodes)
 }
 
 func (f *Fsm) setKV(key, value string) error {
