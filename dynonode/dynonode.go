@@ -3,6 +3,7 @@ package dynonode
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -13,6 +14,10 @@ import (
 	"time"
 
 	"dyno-raft/dynoraft"
+)
+
+var (
+	errJoinFailed = errors.New("join failed")
 )
 
 // DynoNode provides node based on raft with dynamic join/remove
@@ -72,6 +77,10 @@ func (s *DynoNode) Close() {
 
 // join node to the raft
 func (s *DynoNode) JoinToRaft(joinAddr string) error {
+	if s.raftMgr.Leader() != "" {
+		// already joined to raft
+		return nil
+	}
 	// get leader of Raft ring
 	leader := ""
 	for {
@@ -90,6 +99,7 @@ func (s *DynoNode) JoinToRaft(joinAddr string) error {
 		}
 		break
 	}
+	s.logger.Printf("[INFO] joining to Raft over %s", leader)
 
 	// send join request to leader
 	b, err := json.Marshal(map[string]string{
@@ -100,7 +110,7 @@ func (s *DynoNode) JoinToRaft(joinAddr string) error {
 		return err
 	}
 	resp, err := http.Post(
-		fmt.Sprintf("http://%s/join", joinAddr),
+		fmt.Sprintf("http://%s/join", leader),
 		"application-type/json", bytes.NewReader(b),
 	)
 	if err != nil {
@@ -110,7 +120,7 @@ func (s *DynoNode) JoinToRaft(joinAddr string) error {
 	if resp.StatusCode != 200 {
 		body, _ := ioutil.ReadAll(resp.Body)
 		s.logger.Printf("[WARN] Join request failed: %s", string(body))
-		return nil
+		return errJoinFailed
 	}
 	// parse foreign peers list and setup it
 	peers := []string{}

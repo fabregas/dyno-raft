@@ -20,6 +20,10 @@ const (
 	raftTimeout         = 10 * time.Second
 )
 
+var (
+	errNotLeader = errors.New("not leader!")
+)
+
 type command struct {
 	Op    string `json:"op,omitempty"`
 	Key   string `json:"key,omitempty"`
@@ -137,9 +141,9 @@ func (s *RaftManager) checkPeers() {
 	for {
 		time.Sleep(2 * time.Second)
 		peers, _ := s.peerStore.Peers()
-		//fmt.Println(">>>>>> PEERS: ", peers)
 		for _, peer := range peers {
 			if peer == s.raftBind {
+				// this is I am
 				continue
 			}
 			conn, err := net.Dial("tcp", peer)
@@ -286,10 +290,15 @@ func (s *RaftManager) saveNodes() {
 	}
 }
 
-// Join joins a node, located at addr, to this store. The node must be ready to
+// Joins a node, located at addr, to this store. The node must be ready to
 // respond to Raft communications at that address.
 func (s *RaftManager) Join(addr, haddr, name string) ([]string, error) {
 	s.logger.Printf("[INFO] received join request for remote node as %s", addr)
+	if addr == s.raftBind {
+		// self join?
+		// return all known peers
+		return s.peerStore.Peers()
+	}
 
 	curPeers, _ := s.peerStore.Peers()
 	newPeers := raft.AddUniquePeer(curPeers, addr)
@@ -297,12 +306,17 @@ func (s *RaftManager) Join(addr, haddr, name string) ([]string, error) {
 	if s.raft.State() == raft.Leader {
 		fut = s.raft.AddPeer(addr)
 	} else if s.raft.Leader() == "" {
-		fut = s.raft.SetPeers(newPeers)
+		if len(curPeers) == 0 {
+			// no one peer known, try to add this one
+			fut = s.raft.SetPeers(newPeers)
+		} else {
+			return nil, errNotLeader
+		}
 	} else {
-		return nil, errors.New("not leader!")
+		return nil, errNotLeader
 	}
 
-	if fut.Error() != nil {
+	if fut.Error() != nil && fut.Error() != raft.ErrKnownPeer {
 		return nil, fut.Error()
 	}
 
@@ -322,6 +336,9 @@ func (s *RaftManager) RaftStats() map[string]string {
 
 func (s *RaftManager) Leader() string {
 	raftLeader := s.raft.Leader()
+	if raftLeader == "" {
+		return ""
+	}
 
 	for raftAddr, nodeInfo := range s.getNodesInfo() {
 		if raftAddr == raftLeader {

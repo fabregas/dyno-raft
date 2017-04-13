@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"dyno-raft/dynonode"
 )
@@ -18,12 +19,15 @@ import (
 const (
 	DefaultHTTPAddr = ":11000"
 	DefaultRaftAddr = ":12000"
+	BroadcastPort   = 13000
 )
 
 // Command line parameters
 var httpAddr string
 var raftAddr string
 var joinAddr string
+var token string
+var singlenode bool
 var raftDir string
 var nodeName string
 var minNodes int
@@ -32,7 +36,9 @@ func init() {
 	flag.StringVar(&httpAddr, "haddr", DefaultHTTPAddr, "Set the HTTP bind address")
 	flag.StringVar(&raftAddr, "raddr", DefaultRaftAddr, "Set Raft bind address")
 	flag.StringVar(&raftDir, "dir", "", "Set the Raft data path")
-	flag.StringVar(&joinAddr, "join", "", "Set join address, if any")
+	flag.StringVar(&joinAddr, "joinaddr", "", "Set join address, if any")
+	flag.StringVar(&token, "jointoken", "", "Join Raft by UDP discovery mechamism using token")
+	flag.BoolVar(&singlenode, "singlenode", false, "Set the single node Raft mode")
 	flag.IntVar(&minNodes, "quorum", 1, "Set the minimum nodes in raft cluster for quorum")
 	flag.StringVar(&nodeName, "name", "", "Set the node name (label)")
 	flag.Usage = func() {
@@ -97,21 +103,57 @@ func main() {
 	logger := log.New(dynonode.NewLogWriter(0), fmt.Sprintf("[%s] ", nodeName), log.LstdFlags)
 
 	node := dynonode.NewDynoNode(httpAddr, raftAddr, raftDir, nodeName, minNodes, logger)
-	if err := node.Start(joinAddr == ""); err != nil {
+	if err := node.Start(singlenode); err != nil {
 		log.Fatalf("failed to start HTTP service: %s", err.Error())
 	}
 
-	if joinAddr != "" {
-		if err := node.JoinToRaft(joinAddr); err != nil {
-			log.Fatalf("failed to join to Raft: %s", err.Error())
+	var discovery *Discovery
+	if token != "" {
+		discovery = NewDiscovery(BroadcastPort, token, httpAddr)
+	}
+
+	if !singlenode {
+		if joinAddr == "" {
+			if token == "" {
+				panic("Join token expected for peer discovery!")
+			}
+			joinAddr, err = discoveryPeer(discovery)
+			if err != nil {
+				panic("Can't discovery peer over UDP broadcast")
+			}
+			logger.Printf("[INFO] discovered peer at %s", joinAddr)
+		}
+
+		for {
+			if err := node.JoinToRaft(joinAddr); err != nil {
+				//log.Fatalf("failed to join Raft: %s", err.Error())
+				time.Sleep(1 * time.Second) //FIXME
+				continue
+			}
+			break
 		}
 	}
 
-	log.Println("dyno-raft started successfully")
+	logger.Println("[INFO] dyno-raft started successfully")
 
 	terminate := make(chan os.Signal, 1)
 	//signal.Notify(terminate, os.Interrupt)
 	signal.Notify(terminate, syscall.SIGINT, syscall.SIGTERM)
 	<-terminate
-	log.Println("dyno-raft exiting")
+	logger.Println("[INFO] dyno-raft exiting")
+}
+
+func discoveryPeer(d *Discovery) (string, error) {
+	var err error
+	var peer string
+	for i := 0; i < 10; i++ {
+		peer, err = d.PeerDiscover()
+		if err != nil {
+			fmt.Println("failed peer discovery:", err.Error())
+		} else {
+			return peer, nil
+		}
+		time.Sleep(1 * time.Second)
+	}
+	return "", err
 }

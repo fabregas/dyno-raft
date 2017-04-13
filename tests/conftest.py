@@ -68,18 +68,23 @@ def dyno_raft_image(request, docker, session_id):
 
 
 class DynoRaftNode:
-    def __init__(self, name, quorum=1, join_addr=None):
+    def __init__(self, name, quorum=1, join_addr=None, discovery=False):
         self.name = name
         self.quorum = quorum
         self.join_addr = join_addr
         self._container = None
         self.ip = None
+        self._discovery = discovery
 
     def start(self):
         docker = libdocker.Client(version='auto')
         command = '-name {} -quorum {}'.format(self.name, self.quorum)
         if self.join_addr is not None:
-            command += " -join {}:11000".format(self.join_addr)
+            command += " -joinaddr {}:11000".format(self.join_addr)
+        elif not self._discovery:
+            command += " -singlenode"
+        else:
+            command += ' -jointoken 66666666666'
 
         self._container = docker.create_container(
             image=IMAGE,
@@ -147,11 +152,14 @@ class DynoRaftNode:
         self.ip = start_container(docker, self._container['Id'])
 
     def stop(self):
+        if self._container is None:
+            return
         docker = libdocker.Client(version='auto')
         docker.kill(container=self._container['Id'], signal='SIGTERM')
         docker.wait(container=self._container['Id'], timeout=10)
         container_logs(docker, self._container, 'dyno-raft')
         docker.remove_container(self._container['Id'])
+        self._container = None
 
 
 @pytest.fixture(scope='class')
