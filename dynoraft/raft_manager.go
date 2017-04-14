@@ -64,7 +64,7 @@ func NewRaftManager(raftDir, raftAddr, httpAddr, nodeName string, minimumNodesCn
 	}
 }
 
-func (s *RaftManager) Open(enableSingleNode bool) error {
+func (s *RaftManager) Open() error {
 	// Setup Raft configuration.
 	config := raft.DefaultConfig()
 	config.SnapshotInterval = 60 * time.Second
@@ -89,7 +89,7 @@ func (s *RaftManager) Open(enableSingleNode bool) error {
 	// Create peer storage.
 	s.peerStore = &raft.StaticPeers{}
 
-	if enableSingleNode && s.minimumNodesCnt == 1 {
+	if s.minimumNodesCnt == 1 {
 		s.logger.Println("enabling single-node mode")
 		config.EnableSingleNode = true
 		config.DisableBootstrapAfterElect = false
@@ -146,7 +146,7 @@ func (s *RaftManager) checkPeers() {
 				// this is I am
 				continue
 			}
-			conn, err := net.Dial("tcp", peer)
+			conn, err := net.DialTimeout("tcp", peer, 2*time.Second)
 			//fmt.Println(">>> DIAL RESP", conn, err)
 			if err != nil {
 				failCnt[peer] += 1

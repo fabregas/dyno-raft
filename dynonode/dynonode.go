@@ -43,8 +43,8 @@ func NewDynoNode(addr, raftAddr, raftDir, nodeName string, minNodes int, logger 
 }
 
 // Start starts the node.
-func (s *DynoNode) Start(enableSingleNode bool) error {
-	if err := s.raftMgr.Open(enableSingleNode); err != nil {
+func (s *DynoNode) Start() error {
+	if err := s.raftMgr.Open(); err != nil {
 		return err
 	}
 	server := http.Server{

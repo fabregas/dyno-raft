@@ -81,9 +81,7 @@ class DynoRaftNode:
         command = '-name {} -quorum {}'.format(self.name, self.quorum)
         if self.join_addr is not None:
             command += " -joinaddr {}:11000".format(self.join_addr)
-        elif not self._discovery:
-            command += " -singlenode"
-        else:
+        elif self._discovery:
             command += ' -jointoken 66666666666'
 
         self._container = docker.create_container(

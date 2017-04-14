@@ -27,7 +27,6 @@ var httpAddr string
 var raftAddr string
 var joinAddr string
 var token string
-var singlenode bool
 var raftDir string
 var nodeName string
 var minNodes int
@@ -38,7 +37,6 @@ func init() {
 	flag.StringVar(&raftDir, "dir", "", "Set the Raft data path")
 	flag.StringVar(&joinAddr, "joinaddr", "", "Set join address, if any")
 	flag.StringVar(&token, "jointoken", "", "Join Raft by UDP discovery mechamism using token")
-	flag.BoolVar(&singlenode, "singlenode", false, "Set the single node Raft mode")
 	flag.IntVar(&minNodes, "quorum", 1, "Set the minimum nodes in raft cluster for quorum")
 	flag.StringVar(&nodeName, "name", "", "Set the node name (label)")
 	flag.Usage = func() {
@@ -103,27 +101,21 @@ func main() {
 	logger := log.New(dynonode.NewLogWriter(0), fmt.Sprintf("[%s] ", nodeName), log.LstdFlags)
 
 	node := dynonode.NewDynoNode(httpAddr, raftAddr, raftDir, nodeName, minNodes, logger)
-	if err := node.Start(singlenode); err != nil {
+	if err := node.Start(); err != nil {
 		log.Fatalf("failed to start HTTP service: %s", err.Error())
 	}
 
-	var discovery *Discovery
 	if token != "" {
-		discovery = NewDiscovery(BroadcastPort, token, httpAddr)
-	}
-
-	if !singlenode {
-		if joinAddr == "" {
-			if token == "" {
-				panic("Join token expected for peer discovery!")
-			}
-			joinAddr, err = discoveryPeer(discovery)
-			if err != nil {
-				panic("Can't discovery peer over UDP broadcast")
-			}
+		discovery := NewDiscovery(BroadcastPort, token, httpAddr)
+		joinAddr, err = discoveryPeer(discovery)
+		if err != nil {
+			logger.Println("Can't discovery peer over UDP broadcast")
+		} else {
 			logger.Printf("[INFO] discovered peer at %s", joinAddr)
 		}
+	}
 
+	if joinAddr != "" {
 		for {
 			if err := node.JoinToRaft(joinAddr); err != nil {
 				//log.Fatalf("failed to join Raft: %s", err.Error())
